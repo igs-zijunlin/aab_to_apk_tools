@@ -16,7 +16,7 @@ from tkinter import ttk, filedialog, scrolledtext
 #  修正: 改用絕對路徑來定位依賴檔案，避免工作目錄問題
 #  更新: 新增可選的簽署功能
 #  調整: 預設為啟用簽署，並移除腳本層級的金鑰檔案存在性檢查
-#  新增: 轉換時顯示進度條
+#  新增: 轉換與安裝時皆顯示進度條
 #
 # =================================================================
 
@@ -42,7 +42,6 @@ class App:
         self.last_apks_path = None
         self.log_queue = queue.Queue()
 
-        # ✅✅✅ --- 修改：將簽署選項的預設值改回 True --- ✅✅✅
         self.signing_enabled = tk.BooleanVar(value=True)
 
         main_frame = ttk.Frame(root, padding="10")
@@ -62,7 +61,7 @@ class App:
         signing_check = ttk.Checkbutton(convert_frame, text="使用金鑰簽署 APKS (需要 'key' 檔案)", variable=self.signing_enabled)
         signing_check.pack(pady=(10, 5), anchor=tk.W)
 
-        self.progress_bar = ttk.Progressbar(convert_frame, mode='indeterminate')
+        self.convert_progress_bar = ttk.Progressbar(convert_frame, mode='indeterminate')
 
         self.convert_button = ttk.Button(convert_frame, text="🚀 開始轉換與解壓縮", command=self.start_conversion)
         self.convert_button.pack(pady=5, fill=tk.X, side=tk.BOTTOM)
@@ -77,8 +76,12 @@ class App:
         self.apks_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.select_apks_button = ttk.Button(apks_select_frame, text="選擇 APKS...", command=self.select_apks_file)
         self.select_apks_button.pack(side=tk.LEFT, padx=(5, 0))
+
+        # ✅✅✅ --- 新增：安裝區塊的進度條元件 --- ✅✅✅
+        self.install_progress_bar = ttk.Progressbar(install_frame, mode='indeterminate')
+
         adb_frame = ttk.Frame(install_frame)
-        adb_frame.pack(fill=tk.X)
+        adb_frame.pack(fill=tk.X, pady=(5, 0))
         adb_label = ttk.Label(adb_frame, text="BS 模擬器 Port (127.0.0.1:):")
         adb_label.pack(side=tk.LEFT, padx=(0, 5))
         self.adb_port_entry = ttk.Entry(adb_frame, textvariable=self.adb_port, width=15)
@@ -137,13 +140,10 @@ class App:
             self.log_message("請確認 'bundletool-all-1.13.2.jar' 與 .py 腳本放在同一個資料夾。\n")
             return
 
-        # ✅✅✅ --- 修改：移除此處的金鑰檔案存在性檢查 --- ✅✅✅
-        # 現在將直接執行 bundletool，由它來回報檔案是否缺失。
-
         self.set_ui_state(is_busy=True)
         self.convert_button.config(text="轉換中...")
-        self.progress_bar.pack(before=self.convert_button, fill=tk.X, pady=5, expand=True)
-        self.progress_bar.start(10)
+        self.convert_progress_bar.pack(before=self.convert_button, fill=tk.X, pady=5, expand=True)
+        self.convert_progress_bar.start(10)
 
         self.log_area.config(state='normal')
         self.log_area.delete('1.0', tk.END)
@@ -216,6 +216,11 @@ class App:
             return
         self.set_ui_state(is_busy=True)
         self.install_button.config(text="安裝中...")
+
+        # ✅✅✅ --- 顯示並啟動安裝進度條 --- ✅✅✅
+        self.install_progress_bar.pack(fill=tk.X, pady=5, expand=True)
+        self.install_progress_bar.start(10)
+
         self.log_message("\n========================================\n")
         self.log_message(f"📲 開始安裝到模擬器 127.0.0.1:{port}\n")
         self.log_message("========================================\n\n")
@@ -268,11 +273,14 @@ class App:
                 if message == "CONVERT_DONE":
                     self.set_ui_state(is_busy=False)
                     self.convert_button.config(text="🚀 開始轉換與解壓縮")
-                    self.progress_bar.stop()
-                    self.progress_bar.pack_forget()
+                    self.convert_progress_bar.stop()
+                    self.convert_progress_bar.pack_forget()
                 elif message == "INSTALL_DONE":
                     self.set_ui_state(is_busy=False)
                     self.install_button.config(text="📲 安裝到模擬器")
+                    # ✅✅✅ --- 停止並隱藏安裝進度條 --- ✅✅✅
+                    self.install_progress_bar.stop()
+                    self.install_progress_bar.pack_forget()
                 else:
                     self.log_message(message)
         except queue.Empty:
