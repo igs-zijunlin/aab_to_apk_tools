@@ -5,8 +5,10 @@ import threading
 import queue
 import shutil
 import zipfile
+import re
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext
+from datetime import datetime
 
 # =================================================================
 #
@@ -17,6 +19,7 @@ from tkinter import ttk, filedialog, scrolledtext
 #  更新: 新增可選的簽署功能
 #  調整: 預設為啟用簽署，並移除腳本層級的金鑰檔案存在性檢查
 #  新增: 轉換與安裝時皆顯示進度條
+#  優化: 自動搜尋 aapt2 來讀取 Package Name，無需手動複製
 #
 # =================================================================
 
@@ -28,6 +31,44 @@ KEYSTORE_FILE = os.path.join(basedir, 'key')
 KEY_ALIAS = 'key'
 STORE_PASS = '00000000'
 KEY_PASS = '00000000'
+
+
+def find_aapt2():
+    """
+    自動在系統中尋找 aapt2.exe 的路徑。
+    搜尋順序:
+    1. 腳本所在目錄 (方便攜帶)。
+    2. ANDROID_SDK_ROOT 或 ANDROID_HOME 環境變數。
+    3. Windows 預設的 Android SDK 安裝路徑。
+    """
+    # 1. 檢查腳本旁邊是否有 aapt2.exe
+    local_aapt2_path = os.path.join(basedir, 'aapt2.exe')
+    if os.path.exists(local_aapt2_path):
+        return local_aapt2_path
+
+    # 2. 檢查環境變數
+    sdk_root = os.environ.get('ANDROID_SDK_ROOT') or os.environ.get('ANDROID_HOME')
+
+    # 3. 如果沒有環境變數，檢查 Windows 預設路徑
+    if not sdk_root and sys.platform == 'win32':
+        default_sdk_path = os.path.join(os.path.expanduser('~'), 'AppData', 'Local', 'Android', 'Sdk')
+        if os.path.isdir(default_sdk_path):
+            sdk_root = default_sdk_path
+
+    if sdk_root:
+        build_tools_dir = os.path.join(sdk_root, 'build-tools')
+        if os.path.isdir(build_tools_dir):
+            # 尋找最新版本的 build-tools
+            try:
+                versions = sorted([d for d in os.listdir(build_tools_dir) if os.path.isdir(os.path.join(build_tools_dir, d))], reverse=True)
+                for version in versions:
+                    aapt2_path = os.path.join(build_tools_dir, version, 'aapt2.exe')
+                    if os.path.exists(aapt2_path):
+                        return aapt2_path  # 找到就回傳
+            except FileNotFoundError:
+                pass  # 如果 build-tools 資料夾不存在或為空
+
+    return None  # 都找不到
 
 
 class App:
@@ -43,6 +84,7 @@ class App:
         self.log_queue = queue.Queue()
 
         self.signing_enabled = tk.BooleanVar(value=True)
+        self.aapt2_path = find_aapt2()  # 啟動時就先找好 aapt2
 
         main_frame = ttk.Frame(root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
@@ -77,7 +119,6 @@ class App:
         self.select_apks_button = ttk.Button(apks_select_frame, text="選擇 APKS...", command=self.select_apks_file)
         self.select_apks_button.pack(side=tk.LEFT, padx=(5, 0))
 
-        # ✅✅✅ --- 新增：安裝區塊的進度條元件 --- ✅✅✅
         self.install_progress_bar = ttk.Progressbar(install_frame, mode='indeterminate')
 
         adb_frame = ttk.Frame(install_frame)
@@ -194,11 +235,44 @@ class App:
                         with zip_ref.open('universal.apk') as source_apk, open(output_apk_path, 'wb') as target_apk:
                             shutil.copyfileobj(source_apk, target_apk)
                     self.log_queue.put(f"✅ 已成功解壓縮出: {os.path.basename(output_apk_path)}\n")
+
+                    self.log_queue.put("\n--- 正在讀取 Package Name ---\n")
+                    if not self.aapt2_path:
+                        self.log_queue.put("❌ 找不到 'aapt2.exe'。請執行以下任一步驟：\n")
+                        self.log_queue.put("   1. (建議) 安裝 Android SDK Build-Tools。\n")
+                        self.log_queue.put("   2. (備用) 手動將 'aapt2.exe' 複製到與 .py 腳本相同的資料夾。\n")
+                        self.log_queue.put("   將不會重新命名檔案。\n")
+                    else:
+                        self.log_queue.put(f"✅ 找到 aapt2 路徑: {self.aapt2_path}\n")
+                        get_pkg_command = [self.aapt2_path, 'dump', 'badging', output_apk_path]
+                        pkg_process = subprocess.run(get_pkg_command, capture_output=True, text=True, encoding='utf-8', errors='replace', creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+
+                        if pkg_process.returncode == 0 and pkg_process.stdout:
+                            match = re.search(r"package: name='([^']+)'", pkg_process.stdout)
+                            if match:
+                                package_name = match.group(1)
+                                self.log_queue.put(f"✅ 成功讀取 Package Name: {package_name}\n")
+
+                                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                new_apk_filename = f"{package_name}_{timestamp}.apk"
+                                apk_dir = os.path.dirname(output_apk_path)
+                                new_apk_path = os.path.join(apk_dir, new_apk_filename)
+
+                                self.log_queue.put(f"--- 正在重新命名檔案為: {new_apk_filename} ---\n")
+                                os.rename(output_apk_path, new_apk_path)
+                                self.log_queue.put("✅ 檔案重新命名成功！\n")
+                            else:
+                                self.log_queue.put("❌ 在 aapt2 輸出中找不到 Package Name。APK 可能已損毀。\n")
+                        else:
+                            self.log_queue.put("❌ 使用 aapt2 讀取 Package Name 失敗。將不會重新命名檔案。\n")
+                            if pkg_process.stderr:
+                                self.log_queue.put(f"   錯誤訊息: {pkg_process.stderr.strip()}\n")
+
                 except KeyError:
                     self.log_queue.put(f"❌ 解壓縮失敗: 在 '{os.path.basename(output_apks_name)}' 中找不到 'universal.apk'。\n")
                     self.log_queue.put("   請確認 AAB 轉換模式包含 '--mode=universal'。\n")
                 except Exception as e:
-                    self.log_queue.put(f"❌ 解壓縮時發生未預期的錯誤: {e}\n")
+                    self.log_queue.put(f"❌ 解壓縮或重新命名時發生未預期的錯誤: {e}\n")
 
                 self.log_queue.put("\n現在可以點擊按鈕將 APKS 安裝到模擬器。\n")
         except Exception as e:
@@ -217,7 +291,6 @@ class App:
         self.set_ui_state(is_busy=True)
         self.install_button.config(text="安裝中...")
 
-        # ✅✅✅ --- 顯示並啟動安裝進度條 --- ✅✅✅
         self.install_progress_bar.pack(fill=tk.X, pady=5, expand=True)
         self.install_progress_bar.start(10)
 
@@ -278,7 +351,6 @@ class App:
                 elif message == "INSTALL_DONE":
                     self.set_ui_state(is_busy=False)
                     self.install_button.config(text="📲 安裝到模擬器")
-                    # ✅✅✅ --- 停止並隱藏安裝進度條 --- ✅✅✅
                     self.install_progress_bar.stop()
                     self.install_progress_bar.pack_forget()
                 else:
